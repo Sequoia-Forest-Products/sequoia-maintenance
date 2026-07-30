@@ -534,22 +534,24 @@ function ScheduleView({tasks, setTasks, pmItems, setPMItems, settings, selectedW
     const esc = (s) => String(s??"").replace(/&/g,"&amp;").replace(/</g,"&lt;").replace(/>/g,"&gt;");
     const deptSections = Object.entries(team).map(([dept,members])=>{
       const memberBlocks = members.map(member=>{
-        const myTasks = weekTasks.filter(t=>t.assignee===member.name);
+        const myTasks = weekTasks.filter(t=>t.assignee===member.name)
+          .sort((a,b)=>(+b.priority||5)-(+a.priority||5));
         const myHrs = myTasks.reduce((s,t)=>s+(+t.estHours||0),0);
         const rows = myTasks.length===0
-          ? `<tr><td colspan="5" class="empty">No tasks scheduled</td></tr>`
+          ? `<tr><td colspan="6" class="empty">No tasks scheduled</td></tr>`
           : myTasks.map(t=>`
             <tr>
               <td class="chk">☐</td>
               <td class="id">${esc(t.id)}</td>
               <td>${esc(t.title)}${t.machine?`<div class="machine">⚙ ${esc(t.machine)}</div>`:""}</td>
               <td class="type">${esc(t.type)}</td>
+              <td class="pri">P${esc(t.priority||5)} · ${esc(PRIORITY_LABEL(+t.priority||5))}</td>
               <td class="hrs">${esc(t.estHours||0)}h</td>
             </tr>`).join("");
         return `
           <div class="member">
             <div class="member-head"><strong>${esc(member.name)}</strong><span>${myHrs}h / ${esc(member.hours)}h</span></div>
-            <table><thead><tr><th></th><th>#</th><th>Task</th><th>Type</th><th>Est.</th></tr></thead>
+            <table><thead><tr><th></th><th>#</th><th>Task</th><th>Type</th><th>Priority</th><th>Est.</th></tr></thead>
             <tbody>${rows}</tbody></table>
           </div>`;
       }).join("");
@@ -576,6 +578,7 @@ function ScheduleView({tasks, setTasks, pmItems, setPMItems, settings, selectedW
         td.chk{width:20px;font-size:14px}
         td.id{width:36px;font-weight:700;color:#AD4C25;white-space:nowrap}
         td.type{width:70px}
+        td.pri{width:90px;white-space:nowrap}
         td.hrs{width:40px;text-align:right;white-space:nowrap}
         td.empty{color:#999;font-style:italic}
         .machine{color:#666;font-size:10px;margin-top:2px}
@@ -652,7 +655,8 @@ function ScheduleView({tasks, setTasks, pmItems, setPMItems, settings, selectedW
             <div style={{display:"grid",gridTemplateColumns:"repeat(auto-fill,minmax(260px,1fr))",
               gap:12,padding:12,border:`1px solid ${B.border}`,borderTop:"none",borderRadius:"0 0 5px 5px"}}>
               {members.map(member=>{
-                const myTasks = weekTasks.filter(t=>t.assignee===member.name);
+                const myTasks = weekTasks.filter(t=>t.assignee===member.name)
+                  .sort((a,b)=>(+b.priority||5)-(+a.priority||5));
                 const myHrs = myTasks.reduce((s,t)=>s+(+t.estHours||0),0);
                 const myPct = member.hours>0?Math.round(myHrs/member.hours*100):0;
                 const barColor = myPct>100?B.brick:myPct>80?B.gold:B.orange;
@@ -686,6 +690,7 @@ function ScheduleView({tasks, setTasks, pmItems, setPMItems, settings, selectedW
                         <div key={t.id} style={{borderTop:`1px solid ${B.border}`,paddingTop:8,marginTop:8}}>
                           <div style={{display:"flex",gap:4,marginBottom:4,alignItems:"center",flexWrap:"wrap"}}>
                             <Badge color={TYPE_COLOR[t.type]||B.muted}>{t.type}</Badge>
+                            <Badge color={PRIORITY_COLOR(+t.priority||5)}>P{t.priority||5} · {PRIORITY_LABEL(+t.priority||5)}</Badge>
                             <span style={{fontSize:10,color:B.muted,...sf}}>#{t.id}</span>
                             {isCodeRed && <Badge color={B.brick}>🔴 Code Red</Badge>}
                             <button onClick={()=>cycleProgress(t.id)} title="Click to cycle status"
