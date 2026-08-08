@@ -1,6 +1,6 @@
 import React, { useState, useEffect, useCallback } from "react";
 import { createRoot } from "react-dom/client";
-import App from "./App.jsx";
+import App, { TVBoard } from "./App.jsx";
 
 const CLIENT_ID = "991806177035-4icb3cllat3m6rhul5jovjkhjdcrjqd0.apps.googleusercontent.com";
 
@@ -58,4 +58,6 @@ function AuthGate() {
   );
 }
 
-createRoot(document.getElementById("root")).render(<AuthGate/>);
+// Read-only TV wall display at /tv (or #tv) — skips sign-in since a TV can't log in
+const isTV = window.location.pathname.replace(/\/+$/,"") === "/tv" || window.location.hash === "#tv";
+createRoot(document.getElementById("root")).render(isTV ? <TVBoard/> : <AuthGate/>);
