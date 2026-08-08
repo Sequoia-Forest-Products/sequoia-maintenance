@@ -2102,3 +2102,105 @@ export default function App({user, idToken, accessToken}) {
     </div>
   );
 }
+
+// ─── TV BOARD ─────────────────────────────────────────────────────────────────
+// Read-only wall display for the maintenance shop: seq-maint-sys.netlify.app/tv
+// Always shows the current week, one column per person, auto-refreshes.
+export function TVBoard() {
+  const [tasks,    setTasks]    = useState([]);
+  const [settings, setSettings] = useState(DEFAULT_SETTINGS);
+  const [now,      setNow]      = useState(new Date());
+
+  useEffect(()=>{
+    const load = async()=>{
+      try {
+        const [t,s] = await Promise.all([db.getTasks(), db.getSettings()]);
+        setTasks(t);
+        if(s) setSettings(s);
+      } catch(e) { console.error("TV board load failed:", e); }
+    };
+    load();
+    const sub   = db.subscribeToTasks(()=>load());
+    const iv    = setInterval(load, 5*60*1000);
+    const clock = setInterval(()=>setNow(new Date()), 30*1000);
+    return ()=>{ db.unsubscribe(sub); clearInterval(iv); clearInterval(clock); };
+  },[]);
+
+  const week = monStart(todayStr());
+  const team = settings?.team||DEFAULT_SETTINGS.team;
+  const threshold = +(settings?.escalation?.threshold)||4;
+  const people = Object.entries(team).flatMap(([dept,ms])=>ms.map(m=>({...m,dept})));
+  const weekTasks = tasks.filter(t=>t.status==="Scheduled" && t.weekOf===week);
+
+  return (
+    <div style={{minHeight:"100vh",background:B.ink,color:"#fff",padding:"20px 24px",
+      boxSizing:"border-box",...sf}}>
+      <div style={{display:"flex",justifyContent:"space-between",alignItems:"baseline",
+        borderBottom:`3px solid ${B.rust}`,paddingBottom:12,marginBottom:18}}>
+        <div style={{display:"flex",alignItems:"baseline",gap:16}}>
+          <span style={{background:B.rust,borderRadius:5,padding:"5px 14px",
+            fontWeight:900,fontSize:20,letterSpacing:2}}>SEQUOIA</span>
+          <span style={{fontSize:26,fontWeight:800}}>Weekly Maintenance Schedule</span>
+        </div>
+        <div style={{textAlign:"right"}}>
+          <div style={{fontSize:22,fontWeight:800,color:B.gold}}>{fmtWeek(week)}</div>
+          <div style={{fontSize:14,color:"#9A8070"}}>
+            {now.toLocaleDateString("en-US",{weekday:"long",month:"short",day:"numeric"})}
+            {" · "}{now.toLocaleTimeString("en-US",{hour:"numeric",minute:"2-digit"})}
+          </div>
+        </div>
+      </div>
+
+      <div style={{display:"grid",gridTemplateColumns:`repeat(${Math.max(people.length,1)},1fr)`,gap:12}}>
+        {people.map(person=>{
+          const myTasks = weekTasks.filter(t=>t.assignee===person.name)
+            .sort((a,b)=>(+b.priority||5)-(+a.priority||5));
+          const myHrs = myTasks.reduce((s,t)=>s+(+t.estHours||0),0);
+          return (
+            <div key={person.name} style={{background:"#332B26",borderRadius:8,
+              border:"1px solid #4A3F37",overflow:"hidden"}}>
+              <div style={{background:person.dept==="Electrical"?B.teal:B.rust,
+                padding:"10px 12px"}}>
+                <div style={{fontSize:19,fontWeight:800,lineHeight:1.1}}>{person.name}</div>
+                <div style={{fontSize:12,opacity:0.85,marginTop:2}}>{person.dept} · {myHrs}h scheduled</div>
+              </div>
+              <div style={{padding:10}}>
+                {myTasks.length===0
+                  ? <div style={{color:"#9A8070",fontSize:14,fontStyle:"italic",padding:"12px 4px"}}>No tasks this week</div>
+                  : myTasks.map(t=>{
+                    const isCodeRed = (+t.rescheduleCount||0)>=threshold;
+                    const progress = t.progressStatus||"On Track";
+                    return (
+                      <div key={t.id} style={{background:"#27211E",borderRadius:6,
+                        borderLeft:`5px solid ${PRIORITY_COLOR(+t.priority||5)}`,
+                        padding:"9px 11px",marginBottom:8}}>
+                        <div style={{display:"flex",gap:6,alignItems:"center",marginBottom:4,flexWrap:"wrap"}}>
+                          <span style={{fontSize:11,fontWeight:800,color:PRIORITY_COLOR(+t.priority||5)}}>
+                            P{t.priority||5} {PRIORITY_LABEL(+t.priority||5).toUpperCase()}
+                          </span>
+                          <span style={{fontSize:11,color:"#9A8070"}}>{t.type} · {t.estHours||0}h</span>
+                          {isCodeRed && <span style={{fontSize:11,fontWeight:800,color:"#FF6B5E"}}>🔴 CODE RED</span>}
+                          <span style={{marginLeft:"auto",width:10,height:10,borderRadius:"50%",
+                            background:PROGRESS_COLOR[progress],flexShrink:0}} title={progress}/>
+                        </div>
+                        <div style={{fontSize:15,fontWeight:600,lineHeight:1.25,color:"#F5F0EB"}}>{t.title}</div>
+                        {t.machine && <div style={{fontSize:12,color:"#B89F8D",marginTop:3}}>⚙ {t.machine}</div>}
+                      </div>
+                    );
+                  })
+                }
+              </div>
+            </div>
+          );
+        })}
+      </div>
+
+      <div style={{marginTop:14,display:"flex",gap:18,fontSize:12,color:"#9A8070",alignItems:"center"}}>
+        <span><span style={{display:"inline-block",width:9,height:9,borderRadius:"50%",background:PROGRESS_COLOR["On Track"],marginRight:5}}/>On Track</span>
+        <span><span style={{display:"inline-block",width:9,height:9,borderRadius:"50%",background:PROGRESS_COLOR["Marginal"],marginRight:5}}/>Marginal</span>
+        <span><span style={{display:"inline-block",width:9,height:9,borderRadius:"50%",background:PROGRESS_COLOR["Behind"],marginRight:5}}/>Behind</span>
+        <span style={{marginLeft:"auto"}}>Updates automatically · Sequoia Maintenance System</span>
+      </div>
+    </div>
+  );
+}
