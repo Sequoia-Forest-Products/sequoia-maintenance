@@ -133,7 +133,7 @@ const SEED_PM = [
 ];
 
 // ─── PM HELPERS ───────────────────────────────────────────────────────────────
-const FREQ_DAYS = { Weekly:7, Biweekly:14, Monthly:30, Quarterly:91, Biannual:182, Annual:365 };
+const FREQ_DAYS = { Weekly:7, Biweekly:14, "Every 3 Weeks":21, Monthly:30, Quarterly:91, Biannual:182, Annual:365 };
 const daysUntilDue = (lastDone, freq) => {
   if(!lastDone) return -999;
   const last = new Date(lastDone+"T00:00:00");
@@ -977,6 +977,84 @@ function ComplianceView({tasks, setTasks, onEdit}) {
     {label:"Total Remaining",          value:complianceTasks.filter(t=>t.status!=="Complete").length, color:B.rust},
   ];
 
+  const printHanoverReport = () => {
+    const esc = (s) => String(s??"").replace(/&/g,"&amp;").replace(/</g,"&lt;").replace(/>/g,"&gt;");
+    const hanover = complianceTasks.filter(t=>(t.source||"").toLowerCase()==="hanover");
+    const completed  = hanover.filter(t=>t.status==="Complete")
+      .sort((a,b)=>new Date(b.completedAt||0)-new Date(a.completedAt||0));
+    const scheduled  = hanover.filter(t=>t.status==="Scheduled")
+      .sort((a,b)=>(a.weekOf||"").localeCompare(b.weekOf||""));
+    const notStarted = hanover.filter(t=>t.status!=="Complete"&&t.status!=="Scheduled")
+      .sort((a,b)=>(+b.priority||5)-(+a.priority||5));
+
+    const section = (title, rows, headers, mapRow, color) => `
+      <div class="section">
+        <h2 style="border-left-color:${color}">${title} <span class="count">${rows.length}</span></h2>
+        ${rows.length===0 ? `<div class="empty">None</div>` : `
+        <table><thead><tr>${headers.map(h=>`<th>${h}</th>`).join("")}</tr></thead>
+        <tbody>${rows.map(mapRow).join("")}</tbody></table>`}
+      </div>`;
+
+    const html = `
+      ${section("Completed", completed,
+        ["#","Task","Dept","Priority","Completed","By"],
+        t=>`<tr><td class="id">${esc(t.id)}</td><td>${esc(t.title)}</td><td>${esc(t.dept)}</td>
+          <td>P${esc(t.priority||5)} · ${esc(PRIORITY_LABEL(+t.priority||5))}</td>
+          <td class="nw">${t.completedAt?esc(fmtDate(String(t.completedAt).slice(0,10))):"—"}</td>
+          <td>${esc(t.completedBy||t.assignee||"—")}</td></tr>`, "#2E7D32")}
+      ${section("Scheduled", scheduled,
+        ["#","Task","Dept","Priority","Week Of","Assigned To"],
+        t=>`<tr><td class="id">${esc(t.id)}</td><td>${esc(t.title)}</td><td>${esc(t.dept)}</td>
+          <td>P${esc(t.priority||5)} · ${esc(PRIORITY_LABEL(+t.priority||5))}</td>
+          <td class="nw">${t.weekOf?esc(fmtWeek(t.weekOf)):"—"}</td>
+          <td>${esc(t.assignee||"Unassigned")}</td></tr>`, "#EFBA62")}
+      ${section("Not Started", notStarted,
+        ["#","Task","Dept","Priority","Current Status","Est. Hours"],
+        t=>`<tr><td class="id">${esc(t.id)}</td><td>${esc(t.title)}</td><td>${esc(t.dept)}</td>
+          <td>P${esc(t.priority||5)} · ${esc(PRIORITY_LABEL(+t.priority||5))}</td>
+          <td>${esc(t.status)}</td><td class="nw">${esc(t.estHours||"—")}h</td></tr>`, "#902423")}`;
+
+    const w = window.open("", "_blank", "width=980,height=720");
+    if(!w) { alert("Pop-up blocked — allow pop-ups for this site to print."); return; }
+    w.document.write(`<!doctype html><html><head><title>Hanover Compliance Report — ${esc(fmtDate(todayStr()))}</title>
+      <style>
+        body{font-family:Arial,Helvetica,sans-serif;color:#111;margin:24px;font-size:12px}
+        .head{display:flex;justify-content:space-between;align-items:baseline;
+          border-bottom:3px solid #AD4C25;padding-bottom:8px;margin-bottom:6px}
+        .head h1{margin:0;font-size:18px}
+        .head .brand{font-weight:900;letter-spacing:2px;color:#AD4C25;font-size:13px}
+        .summary{margin:10px 0 18px;display:flex;gap:24px;font-size:12px;color:#444}
+        .summary strong{font-size:16px;color:#111}
+        .section{margin-bottom:22px;page-break-inside:avoid}
+        .section h2{font-size:14px;background:#eee;padding:6px 10px;margin:0 0 8px;border-left:4px solid #AD4C25}
+        .count{font-weight:400;color:#666;font-size:12px}
+        table{width:100%;border-collapse:collapse}
+        th{font-size:9px;text-transform:uppercase;letter-spacing:.5px;text-align:left;
+          border-bottom:1px solid #999;padding:3px 6px;color:#555}
+        td{border-bottom:1px solid #ddd;padding:5px 6px;vertical-align:top}
+        td.id{width:36px;font-weight:700;color:#AD4C25;white-space:nowrap}
+        td.nw{white-space:nowrap}
+        .empty{color:#999;font-style:italic;padding:4px 6px}
+        .foot{margin-top:20px;color:#888;font-size:10px;text-align:right}
+      </style></head><body>
+      <div class="head">
+        <div><div class="brand">SEQUOIA FOREST PRODUCTS</div><h1>Hanover Compliance Report</h1></div>
+        <div style="font-size:14px;font-weight:700">${esc(fmtDate(todayStr()))}</div>
+      </div>
+      <div class="summary">
+        <span><strong>${hanover.length}</strong> total items</span>
+        <span><strong>${completed.length}</strong> completed</span>
+        <span><strong>${scheduled.length}</strong> scheduled</span>
+        <span><strong>${notStarted.length}</strong> not started</span>
+      </div>
+      ${html}
+      <div class="foot">Printed ${new Date().toLocaleString("en-US")} · Sequoia Maintenance System</div>
+      </body></html>`);
+    w.document.close();
+    w.focus();
+    setTimeout(()=>w.print(), 250);
+  };
+
   const fBtn = (val,cur,set,color=B.brick) => (
     <button onClick={()=>set(v=>v===val?"All":val)}
       style={{padding:"4px 10px",borderRadius:3,fontSize:11,fontWeight:700,cursor:"pointer",
@@ -1001,6 +1079,7 @@ function ComplianceView({tasks, setTasks, onEdit}) {
           <h2 style={{margin:0,fontSize:18,fontWeight:700,color:B.text,...sf}}>Compliance Register</h2>
           <div style={{color:B.muted,fontSize:12,...sf}}>{items.length} open items</div>
         </div>
+        <Btn variant="teal" onClick={printHanoverReport}>📄 Hanover Report</Btn>
       </div>
       <div style={{display:"grid",gridTemplateColumns:"repeat(auto-fit,minmax(160px,1fr))",
         gap:10,marginBottom:16}}>
@@ -1237,7 +1316,7 @@ function PMForm({item, onSave, onDelete, onClose}) {
       </Field>
       <Field label="Frequency">
         <Sel value={form.frequency} onChange={f("frequency")}>
-          {["Weekly","Biweekly","Monthly","Quarterly","Biannual","Annual"].map(f=><option key={f}>{f}</option>)}
+          {["Weekly","Biweekly","Every 3 Weeks","Monthly","Quarterly","Biannual","Annual"].map(f=><option key={f}>{f}</option>)}
         </Sel>
       </Field>
       <Field label="Default Hours">
@@ -1274,6 +1353,7 @@ function PMHoursChart({pmItems, onClose}) {
   function getWeeksForFreq(freq) {
     if(freq==="Weekly")    return Array.from({length:52},(_,i)=>i+1);
     if(freq==="Biweekly")  return Array.from({length:26},(_,i)=>i*2+1);
+    if(freq==="Every 3 Weeks") return Array.from({length:18},(_,i)=>i*3+1);
     if(freq==="Monthly")   return [1,5,9,14,18,22,27,31,35,40,44,48];
     if(freq==="Quarterly") return [1,14,27,40];
     if(freq==="Biannual")  return [1,27];
