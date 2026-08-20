@@ -23,6 +23,38 @@ const PROGRESS_STATUSES = ["On Track","Marginal","Behind"];
 const PROGRESS_COLOR = { "On Track":"#2E7D32", "Marginal":B.gold, "Behind":B.brick };
 const nextProgressStatus = (s) => PROGRESS_STATUSES[(PROGRESS_STATUSES.indexOf(s)+1)%PROGRESS_STATUSES.length];
 
+// Where a task goes when it is pushed back off the schedule / out of Completed
+const REGISTER_STATUS = { Project:"Projects Register", Repair:"Repair Register",
+  Compliance:"Compliance Register", PM:"Queue" };
+const REGISTER_LABEL  = { Project:"Projects Register", Repair:"Repair Register",
+  Compliance:"Compliance Register", PM:"Queue" };
+// Code Red is PM-only. Non-PM tasks rescheduled this many times land in "Not Completed Tasks".
+const NOT_COMPLETED_THRESHOLD = 3;
+
+// Stamp a completion date/owner on any task moving into "Complete" without one,
+// so nothing lands on the Completed page undated.
+const withCompletion = (t) => t.status!=="Complete"
+  ? t
+  : {...t,
+     completedBy: t.completedBy || t.assignee || currentUser(),
+     completedAt: t.completedAt || new Date().toISOString()};
+
+// Free-text search across the fields shown on a task card
+const taskMatches = (t, q) => {
+  const s = (q||"").trim().toLowerCase();
+  if(!s) return true;
+  return [t.id, t.title, t.machine, t.dept, t.type, t.assignee, t.completedBy,
+    t.addedBy, t.notes, t.source, t.status, PRIORITY_LABEL(+t.priority||5)]
+    .some(v=>String(v??"").toLowerCase().includes(s));
+};
+// Free-text search for PM register rows (machines, not tasks)
+const pmMatches = (p, q) => {
+  const s = (q||"").trim().toLowerCase();
+  if(!s) return true;
+  return [p.machine, p.dept, p.type, p.frequency]
+    .some(v=>String(v??"").toLowerCase().includes(s));
+};
+
 // Task ID prefix — sequential per type, derived from existing tasks
 const TASK_PREFIX = { Project:"P", PM:"M", Compliance:"C", Repair:"R" };
 const nextTaskId = (type, existingTasks) => {
@@ -187,6 +219,21 @@ const Sel = ({value,onChange,children})=>(
     {children}
   </select>
 );
+const SearchBox = ({value,onChange,placeholder="Search…",width=260})=>(
+  <div style={{position:"relative",display:"inline-block",width,verticalAlign:"middle"}}>
+    <span style={{position:"absolute",left:8,top:"50%",transform:"translateY(-50%)",
+      fontSize:11,color:B.muted,pointerEvents:"none"}}>🔍</span>
+    <input value={value} onChange={e=>onChange(e.target.value)} placeholder={placeholder}
+      style={{width:"100%",padding:"6px 26px 6px 26px",borderRadius:3,fontSize:12,
+        border:`1px solid ${value?B.orange:B.border}`,background:"#fff",color:B.text,
+        boxSizing:"border-box",...sf}}/>
+    {value && <button onClick={()=>onChange("")} title="Clear search"
+      style={{position:"absolute",right:5,top:"50%",transform:"translateY(-50%)",
+        border:"none",background:"none",cursor:"pointer",color:B.muted,fontSize:12,
+        lineHeight:1,padding:0,...sf}}>✕</button>}
+  </div>
+);
+
 const Textarea = ({value,onChange,rows=3,placeholder=""})=>(
   <textarea value={value} onChange={onChange} rows={rows} placeholder={placeholder}
     style={{width:"100%",background:"#fff",border:`1px solid ${B.border}`,borderRadius:4,
@@ -354,7 +401,7 @@ function ScheduleModal({task, settings, onSave, onClose}) {
 }
 
 // ─── TASK CARD ────────────────────────────────────────────────────────────────
-function TaskCard({task, actions}) {
+function TaskCard({task, actions, meta}) {
   return (
     <div style={{background:"#fff",border:`1px solid ${B.border}`,borderRadius:5,
       padding:"12px 14px",marginBottom:8,borderLeft:`3px solid ${TYPE_COLOR[task.type]||B.muted}`}}>
@@ -377,9 +424,10 @@ function TaskCard({task, actions}) {
             {task.status==="Scheduled" && task.assignee   && <span>👤 {task.assignee}</span>}
             {task.status==="Complete"  && task.completedBy && <span>✓ {task.completedBy}</span>}
             {task.status==="Complete"  && task.assignee && !task.completedBy && <span>👤 {task.assignee}</span>}
-            {task.status==="Complete"  && task.completedAt && <span>📅 {fmtDate(task.completedAt.slice(0,10))}</span>}
+            {task.status==="Complete"  && task.completedAt && !meta && <span>📅 {fmtDate(String(task.completedAt).slice(0,10))}</span>}
           </div>
         </div>
+        {meta && <div style={{flexShrink:0,textAlign:"right"}}>{meta}</div>}
         {actions && <div style={{display:"flex",gap:4,flexShrink:0,flexWrap:"wrap"}}>{actions}</div>}
       </div>
     </div>
@@ -389,7 +437,8 @@ function TaskCard({task, actions}) {
 // ─── INBOX VIEW ───────────────────────────────────────────────────────────────
 function InboxView({tasks, setTasks, settings, onEdit}) {
   const inbox = tasks.filter(t=>t.status==="Inbox");
-  const move  = (id,status) => setTasks(ts=>ts.map(t=>t.id===id?{...t,status}:t));
+  const move  = (id,status) => setTasks(ts=>ts.map(t=>t.id===id
+    ?withCompletion({...t,status}):t));
   const del   = (id) => { if(window.confirm("Delete this task?")) {
     setTasks(ts=>ts.filter(t=>t.id!==id));
   }};
@@ -490,8 +539,19 @@ function ScheduleView({tasks, setTasks, pmItems, setPMItems, settings, selectedW
   const team = settings?.team||DEFAULT_SETTINGS.team;
   const codeRedThreshold = +(settings?.escalation?.threshold) || 4;
 
-  const weekTasks = tasks.filter(t=>t.status==="Scheduled" && t.weekOf===selectedWeek);
-  const codeRedTasks = tasks.filter(t=>t.status==="Scheduled" && (+t.rescheduleCount||0)>=codeRedThreshold);
+  const [search, setSearch] = useState("");
+
+  // allWeekTasks drives capacity math + printing; weekTasks is what the search shows
+  const allWeekTasks = tasks.filter(t=>t.status==="Scheduled" && t.weekOf===selectedWeek);
+  const weekTasks    = allWeekTasks.filter(t=>taskMatches(t,search));
+
+  // Code Red is for Preventative Maintenance only
+  const codeRedTasks = tasks.filter(t=>t.status==="Scheduled" && t.type==="PM"
+    && (+t.rescheduleCount||0)>=codeRedThreshold);
+  // Everything else that keeps slipping shows up as a Not Completed Task
+  const notCompletedTasks = tasks.filter(t=>t.status==="Scheduled" && t.type!=="PM"
+    && (+t.rescheduleCount||0)>=NOT_COMPLETED_THRESHOLD)
+    .sort((a,b)=>(+b.rescheduleCount||0)-(+a.rescheduleCount||0));
 
   const markDone = (id) => {
     const task = tasks.find(t=>t.id===id);
@@ -521,11 +581,14 @@ function ScheduleView({tasks, setTasks, pmItems, setPMItems, settings, selectedW
   };
   const returnToQueue = (id) => setTasks(ts=>ts.map(t=>t.id===id
     ?{...t,status:"Queue",assignee:"",weekOf:"",weeklyHours:""}:t));
+  // Send a slipping task back to the register it came from
+  const returnToRegister = (t) => setTasks(ts=>ts.map(x=>x.id===t.id
+    ?{...x,status:REGISTER_STATUS[t.type]||"Queue",assignee:"",weekOf:"",weeklyHours:""}:x));
 
   const deptSummary = (dept) => {
     const members = team[dept]||[];
     const cap = members.reduce((s,m)=>s+(+m.hours||40),0);
-    const sched = weekTasks.filter(t=>members.some(m=>m.name===t.assignee))
+    const sched = allWeekTasks.filter(t=>members.some(m=>m.name===t.assignee))
       .reduce((s,t)=>s+(+t.estHours||0),0);
     return {cap,sched,bal:cap-sched};
   };
@@ -534,7 +597,7 @@ function ScheduleView({tasks, setTasks, pmItems, setPMItems, settings, selectedW
     const esc = (s) => String(s??"").replace(/&/g,"&amp;").replace(/</g,"&lt;").replace(/>/g,"&gt;");
     const deptSections = Object.entries(team).map(([dept,members])=>{
       const memberBlocks = members.map(member=>{
-        const myTasks = weekTasks.filter(t=>t.assignee===member.name)
+        const myTasks = allWeekTasks.filter(t=>t.assignee===member.name)
           .sort((a,b)=>(+b.priority||5)-(+a.priority||5));
         const myHrs = myTasks.reduce((s,t)=>s+(+t.estHours||0),0);
         const rows = myTasks.length===0
@@ -602,9 +665,14 @@ function ScheduleView({tasks, setTasks, pmItems, setPMItems, settings, selectedW
       <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:20}}>
         <div>
           <h2 style={{margin:0,fontSize:18,fontWeight:700,color:B.text,...sf}}>Weekly Schedule</h2>
-          <div style={{color:B.muted,fontSize:12,...sf}}>{fmtWeek(selectedWeek)}</div>
+          <div style={{color:B.muted,fontSize:12,...sf}}>
+            {fmtWeek(selectedWeek)}
+            {search && ` · ${weekTasks.length} of ${allWeekTasks.length} matching "${search}"`}
+          </div>
         </div>
-        <div style={{display:"flex",gap:8,alignItems:"center"}}>
+        <div style={{display:"flex",gap:8,alignItems:"center",flexWrap:"wrap",justifyContent:"flex-end"}}>
+          <SearchBox value={search} onChange={setSearch} width={220}
+            placeholder="Search this week…"/>
           <Btn variant="secondary" onClick={()=>setSelectedWeek(monStart(addDays(selectedWeek,-7)))}>← Prev</Btn>
           <Btn variant="secondary" onClick={()=>setSelectedWeek(monStart(todayStr()))}>This Week</Btn>
           <Btn variant="secondary" onClick={()=>setSelectedWeek(monStart(addDays(selectedWeek,7)))}>Next →</Btn>
@@ -618,7 +686,7 @@ function ScheduleView({tasks, setTasks, pmItems, setPMItems, settings, selectedW
           <div style={{display:"flex",alignItems:"center",gap:8,marginBottom:8}}>
             <span style={{fontSize:16}}>🔴</span>
             <span style={{fontWeight:800,fontSize:13,color:B.brick,...sf}}>
-              Code Red — {codeRedTasks.length} task{codeRedTasks.length!==1?"s":""} rescheduled {codeRedThreshold}+ times
+              Code Red — {codeRedTasks.length} PM task{codeRedTasks.length!==1?"s":""} rescheduled {codeRedThreshold}+ times
             </span>
           </div>
           {codeRedTasks.map(t=>(
@@ -629,6 +697,43 @@ function ScheduleView({tasks, setTasks, pmItems, setPMItems, settings, selectedW
                 <span style={{color:B.brick,fontWeight:700}}>Rescheduled {t.rescheduleCount}×</span>
                 <Btn variant="secondary" style={{padding:"3px 8px",fontSize:10}}
                   onClick={()=>setSelectedWeek(t.weekOf)}>View week</Btn>
+              </div>
+            </div>
+          ))}
+        </div>
+      )}
+
+      {notCompletedTasks.length>0 && (
+        <div style={{background:B.gold+"22",border:`1px solid ${B.gold}88`,borderRadius:6,
+          padding:"12px 16px",marginBottom:20}}>
+          <div style={{display:"flex",alignItems:"center",gap:8,marginBottom:4}}>
+            <span style={{fontSize:16}}>⚠️</span>
+            <span style={{fontWeight:800,fontSize:13,color:B.rust,...sf}}>
+              Not Completed Tasks — {notCompletedTasks.length} task{notCompletedTasks.length!==1?"s":""} rescheduled {NOT_COMPLETED_THRESHOLD}+ times
+            </span>
+          </div>
+          <div style={{fontSize:11,color:B.textDim,marginBottom:8,...sf}}>
+            Non-PM work that keeps slipping. Send it back to its register or re-plan it.
+          </div>
+          {notCompletedTasks.map(t=>(
+            <div key={t.id} style={{display:"flex",justifyContent:"space-between",alignItems:"center",
+              gap:8,padding:"6px 10px",background:"#fff",borderRadius:4,marginBottom:4,
+              fontSize:12,flexWrap:"wrap",...sf}}>
+              <span style={{color:B.text,fontWeight:600,minWidth:0}}>
+                <Badge color={TYPE_COLOR[t.type]||B.muted}>{t.type}</Badge>
+                {" "}#{t.id} · {t.title}
+              </span>
+              <div style={{display:"flex",gap:8,alignItems:"center",flexWrap:"wrap"}}>
+                <span style={{color:B.rust,fontWeight:700}}>
+                  Rescheduled {(+t.rescheduleCount||0)} {(+t.rescheduleCount||0)===1?"time":"times"}
+                </span>
+                {t.weekOf && <Btn variant="secondary" style={{padding:"3px 8px",fontSize:10}}
+                  onClick={()=>setSelectedWeek(t.weekOf)}>View week</Btn>}
+                <Btn variant="secondary" style={{padding:"3px 8px",fontSize:10}}
+                  onClick={()=>returnToRegister(t)}
+                  title={`Return to ${REGISTER_LABEL[t.type]||"Queue"}`}>
+                  ↩ {REGISTER_LABEL[t.type]||"Queue"}
+                </Btn>
               </div>
             </div>
           ))}
@@ -685,7 +790,9 @@ function ScheduleView({tasks, setTasks, pmItems, setPMItems, settings, selectedW
                       ? <div style={{color:B.muted,fontSize:12,fontStyle:"italic",...sf}}>No tasks scheduled</div>
                       : myTasks.map(t=>{
                         const progress = t.progressStatus||"On Track";
-                        const isCodeRed = (+t.rescheduleCount||0)>=codeRedThreshold;
+                        const slips = +t.rescheduleCount||0;
+                        const isCodeRed      = t.type==="PM" && slips>=codeRedThreshold;
+                        const isNotCompleted = t.type!=="PM" && slips>=NOT_COMPLETED_THRESHOLD;
                         return (
                         <div key={t.id} style={{borderTop:`1px solid ${B.border}`,paddingTop:8,marginTop:8}}>
                           <div style={{display:"flex",gap:4,marginBottom:4,alignItems:"center",flexWrap:"wrap"}}>
@@ -693,6 +800,7 @@ function ScheduleView({tasks, setTasks, pmItems, setPMItems, settings, selectedW
                             <Badge color={PRIORITY_COLOR(+t.priority||5)}>P{t.priority||5} · {PRIORITY_LABEL(+t.priority||5)}</Badge>
                             <span style={{fontSize:10,color:B.muted,...sf}}>#{t.id}</span>
                             {isCodeRed && <Badge color={B.brick}>🔴 Code Red</Badge>}
+                            {isNotCompleted && <Badge color={B.gold}>⚠️ Not Completed</Badge>}
                             <button onClick={()=>cycleProgress(t.id)} title="Click to cycle status"
                               style={{marginLeft:"auto",cursor:"pointer",border:`1px solid ${PROGRESS_COLOR[progress]}66`,
                                 background:PROGRESS_COLOR[progress]+"22",color:PROGRESS_COLOR[progress],
@@ -715,7 +823,10 @@ function ScheduleView({tasks, setTasks, pmItems, setPMItems, settings, selectedW
                             <Btn style={{padding:"3px 8px",fontSize:10}} onClick={()=>markDone(t.id)}>✓ Done</Btn>
                             <Btn variant="secondary" style={{padding:"3px 8px",fontSize:10}} onClick={()=>onEdit(t)}>Edit</Btn>
                             {onReschedule && <Btn variant="secondary" style={{padding:"3px 8px",fontSize:10}} onClick={()=>onReschedule(t)}>Reschedule</Btn>}
-                            <Btn variant="secondary" style={{padding:"3px 8px",fontSize:10}} onClick={()=>returnToQueue(t.id)}>↩</Btn>
+                            <Btn variant="secondary" style={{padding:"3px 8px",fontSize:10}} onClick={()=>returnToQueue(t.id)} title="Back to Queue">↩</Btn>
+                            {isNotCompleted && <Btn variant="secondary" style={{padding:"3px 8px",fontSize:10}}
+                              onClick={()=>returnToRegister(t)}
+                              title={`Return to ${REGISTER_LABEL[t.type]||"Queue"}`}>↩ Register</Btn>}
                           </div>
                         </div>
                       );})
@@ -731,7 +842,9 @@ function ScheduleView({tasks, setTasks, pmItems, setPMItems, settings, selectedW
       {weekTasks.length===0 && (
         <div style={{textAlign:"center",padding:"32px",background:"#fff",
           border:`1px solid ${B.border}`,borderRadius:5,color:B.muted,fontSize:14,...sf}}>
-          Nothing scheduled for this week yet. Pull tasks from the Queue.
+          {search
+            ? <>No scheduled tasks match “{search}”.</>
+            : <>Nothing scheduled for this week yet. Pull tasks from the Queue.</>}
         </div>
       )}
     </div>
@@ -740,6 +853,7 @@ function ScheduleView({tasks, setTasks, pmItems, setPMItems, settings, selectedW
 
 // ─── PROJECTS REGISTER ────────────────────────────────────────────────────────
 function ProjectsRegisterView({tasks, setTasks, settings, onEdit}) {
+  const [search,     setSearch]     = useState("");
   const [filterDept, setFilterDept] = useState("All");
   const [filterPri,  setFilterPri]  = useState("All");
   const [sortBy,     setSortBy]     = useState("priority");
@@ -770,10 +884,11 @@ function ProjectsRegisterView({tasks, setTasks, settings, onEdit}) {
     return true;
   };
 
-  const items = tasks
-    .filter(t=>t.status==="Projects Register"||t.status==="Register")
+  const all = tasks.filter(t=>t.status==="Projects Register"||t.status==="Register");
+  const items = all
     .filter(t=>filterDept==="All"||t.dept===filterDept)
     .filter(priMatch)
+    .filter(t=>taskMatches(t,search))
     .sort((a,b)=>sortDir==="asc"?-sorters[sortBy](a,b):sorters[sortBy](a,b));
 
   const move = (id,status) => setTasks(ts=>ts.map(t=>t.id===id?{...t,status}:t));
@@ -794,9 +909,13 @@ function ProjectsRegisterView({tasks, setTasks, settings, onEdit}) {
       <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:12}}>
         <div>
           <h2 style={{margin:0,fontSize:18,fontWeight:700,color:B.text,...sf}}>Projects Register</h2>
-          <div style={{color:B.muted,fontSize:12,...sf}}>{items.length} projects in backlog</div>
+          <div style={{color:B.muted,fontSize:12,...sf}}>
+            {items.length} of {all.length} projects in backlog
+          </div>
         </div>
-        <div style={{display:"flex",gap:6}}>
+        <div style={{display:"flex",gap:6,alignItems:"center",flexWrap:"wrap",justifyContent:"flex-end"}}>
+          <SearchBox value={search} onChange={setSearch} width={220}
+            placeholder="Search projects…"/>
           {["All","Millwright","Electrical"].map(d=>(
             <button key={d} onClick={()=>setFilterDept(d)}
               style={{padding:"4px 10px",borderRadius:3,fontSize:11,fontWeight:700,cursor:"pointer",
@@ -826,7 +945,9 @@ function ProjectsRegisterView({tasks, setTasks, settings, onEdit}) {
         <SortBtn col="machine"  label="Machine"/>
       </div>
       {items.length===0
-        ? <div style={{textAlign:"center",padding:"40px 0",color:B.muted,fontSize:14,...sf}}>No projects in register.</div>
+        ? <div style={{textAlign:"center",padding:"40px 0",color:B.muted,fontSize:14,...sf}}>
+            {search ? `No projects match “${search}”.` : "No projects in register."}
+          </div>
         : items.map(t=>(
           <TaskCard key={t.id} task={t} actions={<>
             <Btn style={{padding:"3px 10px",fontSize:11}} onClick={()=>move(t.id,"Queue")}>→ Queue</Btn>
@@ -840,6 +961,7 @@ function ProjectsRegisterView({tasks, setTasks, settings, onEdit}) {
 
 // ─── REPAIR REGISTER ─────────────────────────────────────────────────────────
 function RepairsView({tasks, setTasks, onEdit}) {
+  const [search,     setSearch]     = useState("");
   const [sortBy,     setSortBy]     = useState("priority");
   const [sortDir,    setSortDir]    = useState("desc");
   const [filterDept, setFilterDept] = useState("All");
@@ -867,9 +989,11 @@ function RepairsView({tasks, setTasks, onEdit}) {
     if(filterPri==="Someday")  return p<3;
     return true;
   };
-  const items = tasks.filter(t=>t.status==="Repair Register")
+  const all = tasks.filter(t=>t.status==="Repair Register");
+  const items = all
     .filter(t=>filterDept==="All"||t.dept===filterDept)
     .filter(priMatchR)
+    .filter(t=>taskMatches(t,search))
     .sort((a,b)=>sortDir==="asc"?-sorters[sortBy](a,b):sorters[sortBy](a,b));
   const move = (id,status) => setTasks(ts=>ts.map(t=>t.id===id?{...t,status}:t));
 
@@ -888,17 +1012,23 @@ function RepairsView({tasks, setTasks, onEdit}) {
       <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:12}}>
         <div>
           <h2 style={{margin:0,fontSize:18,fontWeight:700,color:B.text,...sf}}>Repair Register</h2>
-          <div style={{color:B.muted,fontSize:12,...sf}}>{items.length} repairs in backlog</div>
+          <div style={{color:B.muted,fontSize:12,...sf}}>
+            {items.length} of {all.length} repairs in backlog
+          </div>
         </div>
-        {depts.length>0 && <div style={{display:"flex",gap:6}}>
-          {["All",...depts].map(d=>(
-            <button key={d} onClick={()=>setFilterDept(d)}
-              style={{padding:"4px 10px",borderRadius:3,fontSize:11,fontWeight:700,cursor:"pointer",
-                border:`1px solid ${filterDept===d?B.gold:B.border}`,
-                background:filterDept===d?B.gold+"22":"transparent",
-                color:filterDept===d?B.gold:B.textDim,...sf}}>{d}</button>
-          ))}
-        </div>}
+        <div style={{display:"flex",gap:6,alignItems:"center",flexWrap:"wrap",justifyContent:"flex-end"}}>
+          <SearchBox value={search} onChange={setSearch} width={220}
+            placeholder="Search repairs…"/>
+          {depts.length>0 && <div style={{display:"flex",gap:6}}>
+            {["All",...depts].map(d=>(
+              <button key={d} onClick={()=>setFilterDept(d)}
+                style={{padding:"4px 10px",borderRadius:3,fontSize:11,fontWeight:700,cursor:"pointer",
+                  border:`1px solid ${filterDept===d?B.gold:B.border}`,
+                  background:filterDept===d?B.gold+"22":"transparent",
+                  color:filterDept===d?B.gold:B.textDim,...sf}}>{d}</button>
+            ))}
+          </div>}
+        </div>
       </div>
       <div style={{display:"flex",gap:6,marginBottom:8,alignItems:"center",flexWrap:"wrap"}}>
         <span style={{fontSize:11,color:B.muted,...sf}}>PRIORITY</span>
@@ -919,7 +1049,9 @@ function RepairsView({tasks, setTasks, onEdit}) {
         <SortBtn col="machine"  label="Machine"/>
       </div>
       {items.length===0
-        ? <div style={{textAlign:"center",padding:"40px 0",color:B.muted,fontSize:14,...sf}}>No repairs logged.</div>
+        ? <div style={{textAlign:"center",padding:"40px 0",color:B.muted,fontSize:14,...sf}}>
+            {search ? `No repairs match “${search}”.` : "No repairs logged."}
+          </div>
         : items.map(t=>(
           <TaskCard key={t.id} task={t} actions={<>
             <Btn style={{padding:"3px 10px",fontSize:11}} onClick={()=>move(t.id,"Queue")}>→ Queue</Btn>
@@ -933,6 +1065,7 @@ function RepairsView({tasks, setTasks, onEdit}) {
 
 // ─── COMPLIANCE REGISTER ─────────────────────────────────────────────────────
 function ComplianceView({tasks, setTasks, onEdit}) {
+  const [search,       setSearch]       = useState("");
   const [filterSource, setFilterSource] = useState("All");
   const [filterDept,   setFilterDept]   = useState("All");
   const [filterPriC,   setFilterPriC]   = useState("All");
@@ -950,7 +1083,9 @@ function ComplianceView({tasks, setTasks, onEdit}) {
     source:   (a,b)=>(a.source||"").localeCompare(b.source||""),
   };
 
-  const items = tasks.filter(t=>t.status==="Compliance Register")
+  const allOpen = tasks.filter(t=>t.status==="Compliance Register");
+  const items = allOpen
+    .filter(t=>taskMatches(t,search))
     .filter(t=>filterSource==="All"||(t.source||"Other").toLowerCase()===(filterSource).toLowerCase())
     .filter(t=>filterDept==="All"||t.dept===filterDept)
     .filter(t=>{
@@ -1077,9 +1212,15 @@ function ComplianceView({tasks, setTasks, onEdit}) {
       <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:12}}>
         <div>
           <h2 style={{margin:0,fontSize:18,fontWeight:700,color:B.text,...sf}}>Compliance Register</h2>
-          <div style={{color:B.muted,fontSize:12,...sf}}>{items.length} open items</div>
+          <div style={{color:B.muted,fontSize:12,...sf}}>
+            {items.length} of {allOpen.length} open items
+          </div>
         </div>
-        <Btn variant="teal" onClick={printHanoverReport}>📄 Hanover Report</Btn>
+        <div style={{display:"flex",gap:8,alignItems:"center",flexWrap:"wrap",justifyContent:"flex-end"}}>
+          <SearchBox value={search} onChange={setSearch} width={220}
+            placeholder="Search compliance…"/>
+          <Btn variant="teal" onClick={printHanoverReport}>📄 Hanover Report</Btn>
+        </div>
       </div>
       <div style={{display:"grid",gridTemplateColumns:"repeat(auto-fit,minmax(160px,1fr))",
         gap:10,marginBottom:16}}>
@@ -1137,7 +1278,8 @@ function ComplianceView({tasks, setTasks, onEdit}) {
       {items.length===0
         ? <div style={{textAlign:"center",padding:"40px 0",color:B.muted,fontSize:14,...sf,
             background:"#fff",border:`1px solid ${B.border}`,borderRadius:5}}>
-            No compliance items. Add from Inbox or + Add Task.
+            {search ? `No compliance items match “${search}”.`
+                    : "No compliance items. Add from Inbox or + Add Task."}
           </div>
         : items.map(t=>(
           <TaskCard key={t.id} task={t} actions={<>
@@ -1153,20 +1295,39 @@ function ComplianceView({tasks, setTasks, onEdit}) {
 // ─── COMPLETED VIEW ───────────────────────────────────────────────────────────
 function CompletedView({tasks, setTasks}) {
   const [filterType,setFilterType] = useState("All");
+  const [search,    setSearch]     = useState("");
   // FIX #3: filter by who completed it
   const completed = tasks.filter(t=>t.status==="Complete");
   const types = ["Project","PM","Compliance","Repair"];
   const people = [...new Set(completed.map(t=>t.completedBy||t.assignee||"").filter(Boolean))];
 
+  // Completion timestamp as a number; null when the task has no recorded date
+  const doneTime = (t) => {
+    if(!t.completedAt) return null;
+    const ms = new Date(t.completedAt).getTime();
+    return isNaN(ms) ? null : ms;
+  };
+
   const [sortCompleted, setSortCompleted] = useState("date");
   const filtered = completed
     .filter(t=>filterType==="All"||t.type===filterType)
+    .filter(t=>taskMatches(t,search))
+    // Most recently completed first. Tasks with no recorded completion date sink
+    // to the bottom and keep whatever order they were already in (stable sort).
     .sort((a,b)=>{
-      if(sortCompleted==="date") return new Date(b.completedAt||0)-new Date(a.completedAt||0);
+      if(sortCompleted==="date") {
+        const ta = doneTime(a), tb = doneTime(b);
+        if(ta===null && tb===null) return 0;
+        if(ta===null) return 1;
+        if(tb===null) return -1;
+        return tb-ta;
+      }
       if(sortCompleted==="type") return (a.type||"").localeCompare(b.type||"");
       if(sortCompleted==="person") return (a.completedBy||a.assignee||"").localeCompare(b.completedBy||b.assignee||"");
       return 0;
     });
+
+  const undated = completed.filter(t=>doneTime(t)===null).length;
 
   const restore = (t) => {
     const status = t.type==="Compliance"?"Compliance Register"
@@ -1177,7 +1338,19 @@ function CompletedView({tasks, setTasks}) {
 
   return (
     <div>
-      <h2 style={{margin:"0 0 8px",fontSize:18,fontWeight:700,color:B.text,...sf}}>Completed</h2>
+      <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",
+        gap:12,marginBottom:12,flexWrap:"wrap"}}>
+        <div>
+          <h2 style={{margin:0,fontSize:18,fontWeight:700,color:B.text,...sf}}>Completed</h2>
+          <div style={{color:B.muted,fontSize:12,...sf}}>
+            {filtered.length} of {completed.length} task{completed.length!==1?"s":""}
+            {sortCompleted==="date" && " · newest completion first"}
+            {undated>0 && ` · ${undated} with no recorded date`}
+          </div>
+        </div>
+        <SearchBox value={search} onChange={setSearch}
+          placeholder="Search completed tasks…"/>
+      </div>
       {/* Summary cards */}
       <div style={{display:"flex",gap:8,marginBottom:16,flexWrap:"wrap"}}>
         {[{label:"All",count:completed.length,color:B.textDim},...types.map(ty=>({
@@ -1194,7 +1367,7 @@ function CompletedView({tasks, setTasks}) {
 
       <div style={{display:"flex",gap:6,marginBottom:12,alignItems:"center"}}>
         <span style={{fontSize:11,color:B.muted,...sf}}>SORT</span>
-        {[["date","Completed Date"],["type","Type"],["person","Person"]].map(([val,label])=>(
+        {[["date","Most Recently Completed"],["type","Type"],["person","Person"]].map(([val,label])=>(
           <button key={val} onClick={()=>setSortCompleted(val)}
             style={{padding:"4px 10px",borderRadius:3,fontSize:11,fontWeight:700,cursor:"pointer",
               border:`1px solid ${sortCompleted===val?B.teal:B.border}`,
@@ -1203,11 +1376,22 @@ function CompletedView({tasks, setTasks}) {
         ))}
       </div>
       {filtered.length===0
-        ? <div style={{textAlign:"center",padding:"40px 0",color:B.muted,fontSize:14,...sf}}>No completed tasks yet.</div>
+        ? <div style={{textAlign:"center",padding:"40px 0",color:B.muted,fontSize:14,...sf}}>
+            {search||filterType!=="All" ? "No completed tasks match this filter." : "No completed tasks yet."}
+          </div>
         : filtered.map(t=>(
-          <TaskCard key={t.id} task={t} actions={
-            <Btn variant="secondary" style={{padding:"3px 10px",fontSize:11}} onClick={()=>restore(t)}>↩ Restore</Btn>
-          }/>
+          <TaskCard key={t.id} task={t}
+            meta={<>
+              <div style={{fontSize:9,color:B.muted,textTransform:"uppercase",
+                letterSpacing:1,marginBottom:2,...sf}}>Completed</div>
+              <div style={{fontSize:12,fontWeight:700,whiteSpace:"nowrap",...sf,
+                color:t.completedAt?B.teal:B.muted}}>
+                {t.completedAt ? fmtDate(String(t.completedAt).slice(0,10)) : "No date recorded"}
+              </div>
+            </>}
+            actions={
+              <Btn variant="secondary" style={{padding:"3px 10px",fontSize:11}} onClick={()=>restore(t)}>↩ Restore</Btn>
+            }/>
         ))
       }
     </div>
@@ -1445,6 +1629,7 @@ function PMHoursChart({pmItems, onClose}) {
 
 function PMRegisterView({pmItems, setPMItems, tasks, setTasks, partsData, setPartsData}) {
   const [partsModal,setPartsModal] = useState(null);
+  const [search,    setSearch]     = useState("");
   const [editItem,  setEditItem]   = useState(null);
   const [showAdd,   setShowAdd]    = useState(false);
   const [filterDept,  setFilterDept]   = useState("All");
@@ -1497,14 +1682,20 @@ function PMRegisterView({pmItems, setPMItems, tasks, setTasks, partsData, setPar
   const thisWeekMon = monStart(todayStr());
   const nextWeekMon = nextMonday();
 
+  const visiblePM = pmItems.filter(p=>(filterDept==="All"||p.dept===filterDept) && pmMatches(p,search));
+
   return (
     <div>
       <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:12}}>
         <div>
           <h2 style={{margin:0,fontSize:18,fontWeight:700,color:B.text,...sf}}>PM Register</h2>
-          <div style={{color:B.muted,fontSize:12,...sf}}>{pmItems.length} machines</div>
+          <div style={{color:B.muted,fontSize:12,...sf}}>
+            {visiblePM.length} of {pmItems.length} machines
+          </div>
         </div>
-        <div style={{display:"flex",gap:6,alignItems:"center"}}>
+        <div style={{display:"flex",gap:6,alignItems:"center",flexWrap:"wrap",justifyContent:"flex-end"}}>
+          <SearchBox value={search} onChange={setSearch} width={200}
+            placeholder="Search machines…"/>
           {["All","Millwright","Electrical"].map(d=>(
             <button key={d} onClick={()=>setFilterDept(d)}
               style={{padding:"4px 12px",borderRadius:3,fontSize:11,fontWeight:700,cursor:"pointer",
@@ -1537,7 +1728,13 @@ function PMRegisterView({pmItems, setPMItems, tasks, setTasks, partsData, setPar
             </tr>
           </thead>
           <tbody>
-            {[...pmItems].filter(p=>filterDept==="All"||p.dept===filterDept).sort((a,b)=>{
+            {visiblePM.length===0 && (
+              <tr><td colSpan={9} style={{padding:"32px 12px",textAlign:"center",
+                color:B.muted,fontSize:13,...sf}}>
+                {search ? `No machines match “${search}”.` : "No machines in the PM register."}
+              </td></tr>
+            )}
+            {[...visiblePM].sort((a,b)=>{
               const dir = sortDir==="asc"?1:-1;
               if(sortCol==="machine")   return dir*a.machine.localeCompare(b.machine);
               if(sortCol==="dept")      return dir*a.dept.localeCompare(b.dept);
@@ -1565,7 +1762,7 @@ function PMRegisterView({pmItems, setPMItems, tasks, setTasks, partsData, setPar
                 ["Queue","Inbox","Scheduled"].includes(t.status) && t.weekOf===nextWeekMon && pmMatchesTask(t,p));
               const showNextWeekPrompt = p.frequency==="Weekly" && scheduledThisWeek && !queuedNextWeek;
               return (
-                <tr key={p.id} style={{borderBottom:i<pmItems.length-1?`1px solid ${B.border}`:"none",
+                <tr key={p.id} style={{borderBottom:i<visiblePM.length-1?`1px solid ${B.border}`:"none",
                   background:i%2===0?"#fff":B.bg+"88"}}>
                   <td style={{padding:"10px 12px"}}>
                     <div style={{fontWeight:600,color:B.text,...sf}}>{p.machine}</div>
@@ -1811,7 +2008,9 @@ function SettingsPanel({settings, onSave, onClose, onRenameTeamMember}) {
       <div style={{marginBottom:20}}>
         <div style={{fontWeight:700,fontSize:13,color:B.text,marginBottom:4,...sf}}>Escalation — Code Red Alerts</div>
         <div style={{color:B.muted,fontSize:11,marginBottom:12,...sf}}>
-          Tasks rescheduled this many times in a row get flagged as Code Red on the Schedule tab.
+          Preventative Maintenance tasks rescheduled this many times in a row get flagged
+          as Code Red on the Schedule tab. Non-PM tasks rescheduled {NOT_COMPLETED_THRESHOLD}+
+          times are listed under Not Completed Tasks instead.
         </div>
         <Field label="Reschedule threshold">
           <Input type="number" value={escalation.threshold} onChange={e=>setEscalationThreshold(e.target.value)}/>
@@ -2050,7 +2249,9 @@ export default function App({user, idToken, accessToken}) {
   const saveTask = (t) => {
     const isNew = !t.id || !tasks.find(x=>x.id===t.id);
     const withId   = isNew ? {...t, id:nextTaskId(t.type, tasks)} : t;
-    const withUser = isNew ? {...withId, addedBy:currentUser(), createdAt:new Date().toISOString()} : withId;
+    const withUser = withCompletion(isNew
+      ? {...withId, addedBy:currentUser(), createdAt:new Date().toISOString()}
+      : withId);
     setTasksRaw(prev=>isNew?[...prev,withUser]:prev.map(x=>x.id===withUser.id?withUser:x));
     persistTask(withUser);
     setEditTask(null); setShowAddTask(false);
@@ -2248,7 +2449,9 @@ export function TVBoard() {
                 {myTasks.length===0
                   ? <div style={{color:"#9A8070",fontSize:14,fontStyle:"italic",padding:"12px 4px"}}>No tasks this week</div>
                   : myTasks.map(t=>{
-                    const isCodeRed = (+t.rescheduleCount||0)>=threshold;
+                    const slips = +t.rescheduleCount||0;
+                    const isCodeRed      = t.type==="PM" && slips>=threshold;
+                    const isNotCompleted = t.type!=="PM" && slips>=NOT_COMPLETED_THRESHOLD;
                     const progress = t.progressStatus||"On Track";
                     return (
                       <div key={t.id} style={{background:"#27211E",borderRadius:6,
@@ -2260,6 +2463,9 @@ export function TVBoard() {
                           </span>
                           <span style={{fontSize:11,color:"#9A8070"}}>{t.type} · {t.estHours||0}h</span>
                           {isCodeRed && <span style={{fontSize:11,fontWeight:800,color:"#FF6B5E"}}>🔴 CODE RED</span>}
+                          {isNotCompleted && <span style={{fontSize:11,fontWeight:800,color:B.gold}}>
+                            ⚠️ NOT COMPLETED · {slips}×
+                          </span>}
                           <span style={{marginLeft:"auto",width:10,height:10,borderRadius:"50%",
                             background:PROGRESS_COLOR[progress],flexShrink:0}} title={progress}/>
                         </div>
