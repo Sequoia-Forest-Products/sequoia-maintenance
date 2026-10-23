@@ -604,20 +604,6 @@ function ScheduleView({tasks, setTasks, pmItems, setPMItems, settings, selectedW
     && (+t.rescheduleCount||0)>=NOT_COMPLETED_THRESHOLD)
     .sort((a,b)=>(+b.rescheduleCount||0)-(+a.rescheduleCount||0));
 
-  useEffect(()=>{
-    db.getDocs().then(setDocsData)
-      .catch(e=>console.warn("Couldn't load machine documents — run supabase/migrations/0002_add_pm_documents.sql:", e));
-  },[]);
-  const addDoc = async (d) => {
-    await db.addDoc(d);
-    setDocsData(m=>({...m,[d.pmId]:[d,...(m[d.pmId]||[])]}));
-  };
-  const deleteDoc = async (d) => {
-    await docsApi("docDelete", {pmId:d.pmId, fileId:d.driveFileId});
-    await db.deleteDoc(d.id);
-    setDocsData(m=>({...m,[d.pmId]:(m[d.pmId]||[]).filter(x=>x.id!==d.id)}));
-  };
-
   const markDone = (id) => {
     const task = tasks.find(t=>t.id===id);
     if(!task) return;
@@ -1808,6 +1794,20 @@ function PMRegisterView({pmItems, setPMItems, tasks, setTasks, partsData, setPar
   };
   const sortArrow = (col) => sortCol===col ? (sortDir==="asc"?" ↑":" ↓") : "";
 
+  useEffect(()=>{
+    db.getDocs().then(setDocsData)
+      .catch(e=>console.warn("Couldn't load machine documents — run supabase/migrations/0002_add_pm_documents.sql:", e));
+  },[]);
+  const addDoc = async (d) => {
+    await db.addDoc(d);
+    setDocsData(m=>({...m,[d.pmId]:[d,...(m[d.pmId]||[])]}));
+  };
+  const deleteDoc = async (d) => {
+    await docsApi("docDelete", {pmId:d.pmId, fileId:d.driveFileId});
+    await db.deleteDoc(d.id);
+    setDocsData(m=>({...m,[d.pmId]:(m[d.pmId]||[]).filter(x=>x.id!==d.id)}));
+  };
+
   const markDone = (id) => {
     const today = todayStr();
     setPMItems(items=>items.map(p=>p.id===id?{...p,lastDone:today}:p));
@@ -2514,8 +2514,9 @@ export default function App({user, idToken, accessToken}) {
       )}
       {/* Header — stays fixed, never scrolls */}
       <div style={{flexShrink:0,background:B.ink,padding:"0 24px",display:"flex",
-        justifyContent:"space-between",alignItems:"center",height:56}}>
-        <div style={{display:"flex",alignItems:"center",gap:12}}>
+        justifyContent:"space-between",alignItems:"center",height:56,gap:16}}>
+        {/* Title shrinks/clips first so the header buttons are never pushed off-screen */}
+        <div style={{display:"flex",alignItems:"center",gap:12,minWidth:0,overflow:"hidden",whiteSpace:"nowrap"}}>
           <div style={{background:B.rust,borderRadius:4,padding:"4px 10px",
             fontWeight:900,fontSize:14,color:"#fff",letterSpacing:1}}>SEQUOIA</div>
           <div>
@@ -2523,7 +2524,7 @@ export default function App({user, idToken, accessToken}) {
             <div style={{color:"#fff",fontSize:14,fontWeight:700}}>Work Planner <span style={{color:B.muted,fontSize:10,fontWeight:400}}>v4</span></div>
           </div>
         </div>
-        <div style={{display:"flex",alignItems:"center",gap:12}}>
+        <div style={{display:"flex",alignItems:"center",gap:12,flexShrink:0,whiteSpace:"nowrap"}}>
           <span style={{fontSize:12,color:syncLabel.includes("Synced")?B.teal:syncLabel.includes("error")||syncLabel.includes("⚠")?B.brick:B.gold}}
             title="Syncs automatically on load and every 60 seconds">
             ● {syncLabel}
@@ -2542,7 +2543,7 @@ export default function App({user, idToken, accessToken}) {
       <div style={{flex:1,display:"flex",overflow:"hidden"}}>
         <Sidebar activeTab={activeTab} setActiveTab={setActiveTab} inboxCount={inboxCount}/>
         <div style={{flex:1,overflowY:"auto"}}>
-          <div style={{maxWidth:1100,margin:"0 auto",padding:24}}>
+          <div style={{padding:24}}>
             {activeTab==="inbox"     && <InboxView tasks={tasks} setTasks={setTasks} settings={safeSettings} onEdit={setEditTask}/>}
             {activeTab==="queue"     && <QueueView tasks={tasks} setTasks={setTasks} settings={safeSettings} onEdit={setEditTask} onSchedule={setScheduleTask}/>}
             {activeTab==="schedule"  && <ScheduleView tasks={tasks} setTasks={setTasks} pmItems={pmItems} setPMItems={setPMItems} settings={safeSettings} selectedWeek={selectedWeek} setSelectedWeek={setSelectedWeek} onEdit={setEditTask} onReschedule={setScheduleTask}/>}
