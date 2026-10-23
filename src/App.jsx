@@ -604,20 +604,6 @@ function ScheduleView({tasks, setTasks, pmItems, setPMItems, settings, selectedW
     && (+t.rescheduleCount||0)>=NOT_COMPLETED_THRESHOLD)
     .sort((a,b)=>(+b.rescheduleCount||0)-(+a.rescheduleCount||0));
 
-  useEffect(()=>{
-    db.getDocs().then(setDocsData)
-      .catch(e=>console.warn("Couldn't load machine documents — run supabase/migrations/0002_add_pm_documents.sql:", e));
-  },[]);
-  const addDoc = async (d) => {
-    await db.addDoc(d);
-    setDocsData(m=>({...m,[d.pmId]:[d,...(m[d.pmId]||[])]}));
-  };
-  const deleteDoc = async (d) => {
-    await docsApi("docDelete", {pmId:d.pmId, fileId:d.driveFileId});
-    await db.deleteDoc(d.id);
-    setDocsData(m=>({...m,[d.pmId]:(m[d.pmId]||[]).filter(x=>x.id!==d.id)}));
-  };
-
   const markDone = (id) => {
     const task = tasks.find(t=>t.id===id);
     if(!task) return;
@@ -1807,6 +1793,20 @@ function PMRegisterView({pmItems, setPMItems, tasks, setTasks, partsData, setPar
     else { setSortCol(col); setSortDir("asc"); }
   };
   const sortArrow = (col) => sortCol===col ? (sortDir==="asc"?" ↑":" ↓") : "";
+
+  useEffect(()=>{
+    db.getDocs().then(setDocsData)
+      .catch(e=>console.warn("Couldn't load machine documents — run supabase/migrations/0002_add_pm_documents.sql:", e));
+  },[]);
+  const addDoc = async (d) => {
+    await db.addDoc(d);
+    setDocsData(m=>({...m,[d.pmId]:[d,...(m[d.pmId]||[])]}));
+  };
+  const deleteDoc = async (d) => {
+    await docsApi("docDelete", {pmId:d.pmId, fileId:d.driveFileId});
+    await db.deleteDoc(d.id);
+    setDocsData(m=>({...m,[d.pmId]:(m[d.pmId]||[]).filter(x=>x.id!==d.id)}));
+  };
 
   const markDone = (id) => {
     const today = todayStr();
