@@ -112,6 +112,57 @@ const gsGet  = (action) => fetch(`${API}?action=${action}`).then(r=>r.json()).ca
 const gsPost = (action, payload) => fetch(API,{method:"POST",headers:{"Content-Type":"application/json"},
   body:JSON.stringify({action,...payload})}).then(r=>r.json()).catch(()=>null);
 
+// Machine documents go through the Netlify function to Google Drive
+const DOCS_API = "/.netlify/functions/api";
+const DIRECT_UPLOAD_MAX = 4 * 1024 * 1024; // matches the function's base64 fallback limit
+const tokenExp = (t) => {
+  try { return JSON.parse(atob(t.split(".")[1].replace(/-/g,"+").replace(/_/g,"/"))).exp*1000; }
+  catch { return 0; }
+};
+// Google ID tokens last an hour; ask Google Sign-In for a new one when it's close to expiring
+const freshIdToken = async () => {
+  const cur = window.__sfpCtx?.idToken;
+  if(cur && tokenExp(cur) > Date.now()+60000) return cur;
+  window.google?.accounts?.id?.prompt();
+  for(let i=0;i<40;i++) {
+    await new Promise(r=>setTimeout(r,250));
+    const t = window.__sfpCtx?.idToken;
+    if(t && t!==cur && tokenExp(t) > Date.now()) return t;
+  }
+  throw new Error("Your sign-in has expired — reload the page and try again.");
+};
+const docsApi = async (action, payload) => {
+  const r = await fetch(`${DOCS_API}?action=${action}`, {method:"POST",
+    headers:{"Content-Type":"application/json", Authorization:`Bearer ${await freshIdToken()}`},
+    body:JSON.stringify(payload)});
+  const data = await r.json().catch(()=>({}));
+  if(!r.ok) throw new Error(data.error || `Upload service error (${r.status})`);
+  return data;
+};
+const fileToBase64 = (file) => new Promise((res,rej)=>{
+  const fr = new FileReader();
+  fr.onload  = () => res(String(fr.result).split(",")[1]||"");
+  fr.onerror = () => rej(fr.error);
+  fr.readAsDataURL(file);
+});
+// Upload one file to the machine's Drive folder; returns the Drive file info
+const uploadMachineDoc = async (pm, file) => {
+  const meta = {pmId:pm.id, machine:pm.machine, name:file.name,
+    mimeType:file.type||"application/octet-stream", size:file.size};
+  const {uploadUrl} = await docsApi("docUploadStart", meta);
+  let fileId = null;
+  try {
+    const r = await fetch(uploadUrl,{method:"PUT",headers:{"Content-Type":meta.mimeType},body:file});
+    if(r.ok) fileId = (await r.json()).id;
+  } catch(e) { console.warn("Direct Drive upload failed, trying fallback:", e); }
+  if(fileId) return docsApi("docUploadFinish", {pmId:pm.id, fileId});
+  if(file.size > DIRECT_UPLOAD_MAX) throw new Error(`Couldn't upload ${file.name} to Google Drive.`);
+  return docsApi("docUploadDirect", {...meta, base64:await fileToBase64(file)});
+};
+const fmtBytes = (n) => !n ? "" : n<1024 ? `${n} B` : n<1048576 ? `${Math.round(n/1024)} KB` : `${(n/1048576).toFixed(1)} MB`;
+const docIcon = (m="") => m.includes("pdf")?"📕":m.startsWith("image/")?"🖼️":
+  /sheet|excel|csv/.test(m)?"📊":/word|document|text/.test(m)?"📝":"📄";
+
 const currentUser = () => window.__sfpCtx?.user?.name || window.__sfpCtx?.user?.email || "Unknown";
 
 // ─── DEFAULT SETTINGS ────────────────────────────────────────────────────────
@@ -552,6 +603,20 @@ function ScheduleView({tasks, setTasks, pmItems, setPMItems, settings, selectedW
   const notCompletedTasks = tasks.filter(t=>t.status==="Scheduled" && t.type!=="PM"
     && (+t.rescheduleCount||0)>=NOT_COMPLETED_THRESHOLD)
     .sort((a,b)=>(+b.rescheduleCount||0)-(+a.rescheduleCount||0));
+
+  useEffect(()=>{
+    db.getDocs().then(setDocsData)
+      .catch(e=>console.warn("Couldn't load machine documents — run supabase/migrations/0002_add_pm_documents.sql:", e));
+  },[]);
+  const addDoc = async (d) => {
+    await db.addDoc(d);
+    setDocsData(m=>({...m,[d.pmId]:[d,...(m[d.pmId]||[])]}));
+  };
+  const deleteDoc = async (d) => {
+    await docsApi("docDelete", {pmId:d.pmId, fileId:d.driveFileId});
+    await db.deleteDoc(d.id);
+    setDocsData(m=>({...m,[d.pmId]:(m[d.pmId]||[]).filter(x=>x.id!==d.id)}));
+  };
 
   const markDone = (id) => {
     const task = tasks.find(t=>t.id===id);
@@ -1477,6 +1542,104 @@ function PartsModal({machine, parts, onSave, onClose}) {
   );
 }
 
+// ─── DOCUMENTS MODAL ─────────────────────────────────────────────────────────
+function DocsModal({pm, docs, onAdd, onDelete, onClose}) {
+  const [uploading,setUploading] = useState([]);   // file names in flight
+  const [error,    setError]     = useState("");
+  const [dragOver, setDragOver]  = useState(false);
+  const inputRef = useRef(null);
+
+  const upload = async (files) => {
+    setError("");
+    for(const file of Array.from(files||[])) {
+      setUploading(u=>[...u,file.name]);
+      try {
+        const f = await uploadMachineDoc(pm, file);
+        await onAdd({id:uid(), pmId:pm.id, name:f.name, mimeType:f.mimeType, size:f.size,
+          driveFileId:f.fileId, url:f.url, uploadedBy:currentUser(),
+          uploadedAt:new Date().toISOString()});
+      } catch(e) {
+        console.error("Document upload failed:", e);
+        setError(`${file.name}: ${e.message}`);
+      }
+      setUploading(u=>u.filter(n=>n!==file.name));
+    }
+  };
+  const remove = async (d) => {
+    if(!window.confirm(`Delete “${d.name}”? It will be moved to the Google Drive trash.`)) return;
+    setError("");
+    try { await onDelete(d); }
+    catch(e) { console.error("Document delete failed:", e); setError(`${d.name}: ${e.message}`); }
+  };
+
+  return (
+    <Modal title={`Documents — ${pm.machine}`} onClose={onClose} wide>
+      <div
+        onDragOver={e=>{e.preventDefault();setDragOver(true);}}
+        onDragLeave={()=>setDragOver(false)}
+        onDrop={e=>{e.preventDefault();setDragOver(false);upload(e.dataTransfer.files);}}
+        onClick={()=>inputRef.current?.click()}
+        style={{border:`2px dashed ${dragOver?B.orange:B.border}`,borderRadius:6,padding:"18px 12px",
+          textAlign:"center",cursor:"pointer",marginBottom:16,
+          background:dragOver?B.orange+"11":B.surface2,color:B.textDim,fontSize:12,...sf}}>
+        <div style={{fontWeight:700,color:B.text,marginBottom:2}}>Drop files here or click to upload</div>
+        Manuals, drawings, procedures, signed paperwork — stored in Google Drive
+        <input ref={inputRef} type="file" multiple style={{display:"none"}}
+          onChange={e=>{upload(e.target.files);e.target.value="";}}/>
+      </div>
+      {error && <div style={{color:B.brick,fontSize:12,marginBottom:12,padding:"8px 12px",
+        background:B.brick+"11",borderRadius:4,...sf}}>⚠ {error}</div>}
+      {uploading.map(n=>(
+        <div key={n} style={{fontSize:12,color:B.teal,marginBottom:6,...sf}}>⏳ Uploading {n}…</div>
+      ))}
+      {docs.length>0 ? (
+        <div style={{overflowX:"auto",marginBottom:16}}>
+          <table style={{width:"100%",borderCollapse:"collapse",fontSize:12}}>
+            <thead>
+              <tr style={{background:B.surface2}}>
+                {["File","Size","Uploaded",""].map(h=>(
+                  <th key={h} style={{padding:"7px 10px",color:B.textDim,fontWeight:700,
+                    fontSize:10,textTransform:"uppercase",letterSpacing:0.5,
+                    textAlign:"left",whiteSpace:"nowrap"}}>{h}</th>
+                ))}
+              </tr>
+            </thead>
+            <tbody>
+              {docs.map(d=>(
+                <tr key={d.id} style={{borderBottom:`1px solid ${B.border}`}}>
+                  <td style={{padding:"8px 10px"}}>
+                    <a href={d.url} target="_blank" rel="noreferrer"
+                      style={{color:B.text,fontWeight:600,textDecoration:"none",...sf}}>
+                      {docIcon(d.mimeType)} {d.name}
+                    </a>
+                  </td>
+                  <td style={{padding:"8px 10px",color:B.muted,whiteSpace:"nowrap"}}>{fmtBytes(d.size)}</td>
+                  <td style={{padding:"8px 10px",color:B.muted}}>
+                    {fmtDate(d.uploadedAt)}{d.uploadedBy?` · ${d.uploadedBy}`:""}
+                  </td>
+                  <td style={{padding:"8px 10px",whiteSpace:"nowrap"}}>
+                    <a href={d.url} target="_blank" rel="noreferrer"
+                      style={{color:B.orange,fontSize:12,marginRight:8,textDecoration:"none",...sf}}>Open</a>
+                    <button onClick={()=>remove(d)} style={{background:"none",border:"none",
+                      color:B.brick,cursor:"pointer",fontSize:12,...sf}}>✕</button>
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      ) : !uploading.length && (
+        <div style={{padding:"12px 0 24px",textAlign:"center",color:B.muted,fontSize:13,...sf}}>
+          No documents attached to this machine yet.
+        </div>
+      )}
+      <div style={{display:"flex",justifyContent:"flex-end",borderTop:`1px solid ${B.border}`,paddingTop:14}}>
+        <Btn variant="secondary" onClick={onClose}>Close</Btn>
+      </div>
+    </Modal>
+  );
+}
+
 // ─── PM FORM ──────────────────────────────────────────────────────────────────
 function PMForm({item, onSave, onDelete, onClose}) {
   const blank = {machine:"",dept:"Millwright",type:"Mechanical",frequency:"Weekly",
@@ -1629,6 +1792,8 @@ function PMHoursChart({pmItems, onClose}) {
 
 function PMRegisterView({pmItems, setPMItems, tasks, setTasks, partsData, setPartsData}) {
   const [partsModal,setPartsModal] = useState(null);
+  const [docsModal, setDocsModal]  = useState(null);
+  const [docsData,  setDocsData]   = useState({});
   const [search,    setSearch]     = useState("");
   const [editItem,  setEditItem]   = useState(null);
   const [showAdd,   setShowAdd]    = useState(false);
@@ -1774,6 +1939,11 @@ function PMRegisterView({pmItems, setPMItems, tasks, setTasks, partsData, setPar
                           fontSize:11,padding:0,...sf}}>
                         🔩 Parts ({(partsData[p.id]||[]).length})
                       </button>
+                      <button onClick={()=>setDocsModal(p.id)}
+                        style={{background:"none",border:"none",color:B.wine,cursor:"pointer",
+                          fontSize:11,padding:0,...sf}}>
+                        📁 Docs ({(docsData[p.id]||[]).length})
+                      </button>
                     </div>
                   </td>
                   <td style={{padding:"10px 12px"}}>
@@ -1846,6 +2016,16 @@ function PMRegisterView({pmItems, setPMItems, tasks, setTasks, partsData, setPar
           parts={partsData[partsModal]||[]}
           onSave={(parts)=>{setPartsData(d=>({...d,[partsModal]:parts}),partsModal);setPartsModal(null);}}
           onClose={()=>setPartsModal(null)}
+        />
+      )}
+
+      {docsModal && pmItems.some(p=>p.id===docsModal) && (
+        <DocsModal
+          pm={pmItems.find(p=>p.id===docsModal)}
+          docs={docsData[docsModal]||[]}
+          onAdd={addDoc}
+          onDelete={deleteDoc}
+          onClose={()=>setDocsModal(null)}
         />
       )}
 
