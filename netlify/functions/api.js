@@ -41,8 +41,11 @@ async function verifyUser(event) {
 
 // ── Google Drive (machine documents) ──────────────────────────────────────────
 // Files live in a Shared Drive folder (DRIVE_FOLDER_ID), one subfolder per PM machine,
-// written by a service account (GOOGLE_SERVICE_ACCOUNT_JSON) that is a Content Manager
-// on that Shared Drive. Service accounts have no My Drive quota, so it must be a Shared Drive.
+// written by the app's Google service account (GOOGLE_CLIENT_EMAIL + GOOGLE_PRIVATE_KEY),
+// which must be a Content Manager on that Shared Drive. Service accounts have no My Drive quota, so it must be a Shared Drive.
+const GOOGLE_CLIENT_EMAIL = process.env.GOOGLE_CLIENT_EMAIL;
+// Netlify env vars usually hold the PEM key with literal "\n" escapes
+const GOOGLE_PRIVATE_KEY  = (process.env.GOOGLE_PRIVATE_KEY || "").replace(/\\n/g, "\n");
 const DRIVE_FOLDER_ID    = process.env.DRIVE_FOLDER_ID;
 const DRIVE_SHARE_DOMAIN = process.env.DRIVE_SHARE_DOMAIN ?? ALLOWED_DOMAIN;
 const DRIVE_FILE_FIELDS  = "id,name,mimeType,size,webViewLink,createdTime,appProperties,trashed";
@@ -53,15 +56,14 @@ let driveTokenCache = null;
 
 async function driveToken() {
   if (driveTokenCache && driveTokenCache.exp > Date.now() + 60_000) return driveTokenCache.token;
-  if (!process.env.GOOGLE_SERVICE_ACCOUNT_JSON || !DRIVE_FOLDER_ID)
-    throw new HttpError(500, "Document storage isn't set up — GOOGLE_SERVICE_ACCOUNT_JSON and DRIVE_FOLDER_ID must be set in Netlify env vars");
-  const sa  = JSON.parse(process.env.GOOGLE_SERVICE_ACCOUNT_JSON);
+  if (!GOOGLE_CLIENT_EMAIL || !GOOGLE_PRIVATE_KEY || !DRIVE_FOLDER_ID)
+    throw new HttpError(500, "Document storage isn't set up — GOOGLE_CLIENT_EMAIL, GOOGLE_PRIVATE_KEY and DRIVE_FOLDER_ID must be set in Netlify env vars");
   const now = Math.floor(Date.now()/1000);
   const unsigned = b64url(JSON.stringify({ alg:"RS256", typ:"JWT" })) + "." + b64url(JSON.stringify({
-    iss: sa.client_email, scope: "https://www.googleapis.com/auth/drive",
+    iss: GOOGLE_CLIENT_EMAIL, scope: "https://www.googleapis.com/auth/drive",
     aud: "https://oauth2.googleapis.com/token", iat: now, exp: now + 3600,
   }));
-  const sig = crypto.createSign("RSA-SHA256").update(unsigned).sign(sa.private_key);
+  const sig = crypto.createSign("RSA-SHA256").update(unsigned).sign(GOOGLE_PRIVATE_KEY);
   const r = await fetch("https://oauth2.googleapis.com/token", {
     method: "POST",
     headers: { "Content-Type": "application/x-www-form-urlencoded" },
