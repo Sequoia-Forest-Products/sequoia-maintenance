@@ -196,6 +196,35 @@ export const db = {
     }
   },
 
+  // Get machine documents (Google Drive metadata) as { pmId: [docs] }
+  async getDocs() {
+    const { data, error } = await supabase
+      .from('pm_documents')
+      .select('*')
+      .order('uploaded_at', { ascending: false })
+    if (error) throw error
+    const map = {}
+    ;(data || []).forEach(d => {
+      if (!map[d.pm_id]) map[d.pm_id] = []
+      map[d.pm_id].push({ id:d.id, pmId:d.pm_id, name:d.name, mimeType:d.mime_type, size:+d.size_bytes||0,
+        driveFileId:d.drive_file_id, url:d.url, uploadedBy:d.uploaded_by, uploadedAt:d.uploaded_at })
+    })
+    return map
+  },
+
+  async addDoc(d) {
+    const { error } = await supabase.from('pm_documents').insert({
+      id:d.id, pm_id:d.pmId, name:d.name, mime_type:d.mimeType||'', size_bytes:d.size||0,
+      drive_file_id:d.driveFileId, url:d.url||'', uploaded_by:d.uploadedBy||'', uploaded_at:d.uploadedAt,
+    })
+    if (error) throw error
+  },
+
+  async deleteDoc(id) {
+    const { error } = await supabase.from('pm_documents').delete().eq('id', id)
+    if (error) throw error
+  },
+
   // Get settings
   async getSettings() {
     const { data } = await supabase.from('settings').select('data').eq('id', 1).single()
