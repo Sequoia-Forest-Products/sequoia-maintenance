@@ -1,5 +1,5 @@
 // SFP Maintenance System — Netlify Function
-const crypto = require("crypto");
+import crypto from "crypto";
 const APPS_SCRIPT_URL = "https://script.google.com/macros/s/AKfycbySWpkDC8MJ0-2VBtPVRptP-jCpT_yBcD92s874XfAQMg03a4zUyNizpEIh9PECkDOx/exec";
 const ANTHROPIC_KEY   = process.env.ANTHROPIC_API_KEY;
 
@@ -226,7 +226,7 @@ If you cannot read the handwriting clearly, make your best guess.` }
   return JSON.parse(clean);
 }
 
-exports.handler = async (event) => {
+export const handler = async (event) => {
   if (event.httpMethod === "OPTIONS")
     return { statusCode: 200, headers: CORS, body: "" };
 
